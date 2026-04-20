@@ -7,6 +7,7 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      api.flightradar24.com
+// @connect      aviationweather.gov
 // @run-at       document-start
 // ==/UserScript==
 
@@ -42,7 +43,7 @@
             border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.6);
             font-family: -apple-system, sans-serif; display: none;
             flex-direction: column; border: 1px solid #374151; backdrop-filter: blur(10px);
-            overflow: hidden; resize: both; /* เพิ่มคุณสมบัติเพื่อให้ปรับขนาดได้ */
+            overflow: hidden; resize: both;
         }
 
         .fs-api-status-dot {
@@ -70,7 +71,7 @@
 
         .metar-body {
             padding: 14px;
-            flex: 1 1 auto; /* ปรับให้ขยายตามขนาดกล่อง Widget อัตโนมัติ */
+            flex: 1 1 auto;
             overflow-y: auto;
             min-height: 0;
         }
@@ -154,6 +155,8 @@
         let currentSection = "MAIN";
 
         tokens.forEach((token, index) => {
+            if (token === 'METAR' || token === 'SPECI') return;
+
             if (token === 'RMK') { currentSection = "RMK"; return; }
             if (trendMap[token]) { currentSection = "TREND"; data.trend.push({ raw: token, decoded: trendMap[token] }); return; }
             if (currentSection === "RMK") { data.rmk += token.replace('-', ' ') + " "; return; }
@@ -173,10 +176,12 @@
                 }
             }
 
-            if (index === 0 && /^[A-Z]{4}$/.test(token)) { data.station = { raw: token, decoded: `${token}` }; return; }
-            if (/^\d{6}Z$/.test(token)) { data.time = { raw: token, decoded: `วันที่ ${token.substring(0, 2)} เวลา ${token.substring(2, 4)}:${token.substring(4, 6)} UTC` }; return; }
             if (token === 'AUTO') { data.auto = { raw: token, decoded: `ระบบอัตโนมัติ` }; return; }
             if (token === 'COR') { data.auto = { raw: token, decoded: `แก้ไขข้อมูล (COR)` }; return; }
+
+            if (!data.station && /^[A-Z]{4}$/.test(token)) { data.station = { raw: token, decoded: `${token}` }; return; }
+
+            if (/^\d{6}Z$/.test(token)) { data.time = { raw: token, decoded: `วันที่ ${token.substring(0, 2)} เวลา ${token.substring(2, 4)}:${token.substring(4, 6)} UTC` }; return; }
 
             const windMatch = token.match(/^(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?(KT|MPS|KMH)$/);
             if (windMatch) {
@@ -351,10 +356,31 @@
         return html;
     }
 
+    // =========================================================================
+    // 6. API Fetch (Primary: AWC, Fallback: FR24)
+    // =========================================================================
+    function fetchAWCWeather(code) {
+        return new Promise((resolve, reject) => {
+            const url = `https://aviationweather.gov/api/data/metar?ids=${code}&format=raw`;
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: url,
+                headers: {
+                    "User-Agent": "FR24_METAR_Widget/1.3",
+                    "Accept": "text/plain"
+                },
+                onload: (res) => {
+                    if (res.status === 200) {
+                        const data = res.responseText.trim();
+                        if (data && data.length > 5) resolve(data);
+                        else reject(new Error("No METAR data from AWC"));
+                    } else reject(new Error(`AWC HTTP ${res.status}`));
+                },
+                onerror: () => reject(new Error("AWC Network Error"))
+            });
+        });
+    }
 
-    // =========================================================================
-    // 6. API Fetch
-    // =========================================================================
     function fetchFR24Weather(airportCode) {
         return new Promise((resolve, reject) => {
             const url = `https://api.flightradar24.com/common/v1/airport.json?code=${airportCode}&plugin[]=weather`;
@@ -372,21 +398,35 @@
         });
     }
 
+    async function fetchWeather(airportCode) {
+        try {
+            const awcMetar = await fetchAWCWeather(airportCode);
+            if (awcMetar) {
+                console.log("[METAR Widget] Data sourced from AWC API");
+                return awcMetar;
+            }
+        } catch (e) {
+            console.warn("[METAR Widget] AWC API failed or empty, falling back to Flightradar24 API...", e);
+        }
+
+        console.log("[METAR Widget] Data sourced from Flightradar24 API");
+        return await fetchFR24Weather(airportCode);
+    }
+
     // =========================================================================
     // 7. UI Creation & Logic
     // =========================================================================
     window.addEventListener('load', () => {
         const AIRPORT_KEY = 'fr24_target_airport';
-        let CURRENT_AIRPORT = storage.get(AIRPORT_KEY, 'CEI');
+        let CURRENT_AIRPORT = storage.get(AIRPORT_KEY, 'VTCT');
 
         const POS_KEY = 'fr24_metar_pos';
         const STATE_KEY = 'fr24_metar_state';
-        const SIZE_KEY = 'fr24_metar_size'; // คีย์สำหรับจำขนาดหน้าต่าง
+        const SIZE_KEY = 'fr24_metar_size';
 
         const savedPos = storage.get(POS_KEY);
-        const savedSize = storage.get(SIZE_KEY); // ดึงขนาดที่เซฟไว้
+        const savedSize = storage.get(SIZE_KEY);
 
-        // Status Dot
         const statusDot = document.createElement('div');
         statusDot.className = 'fs-api-status-dot';
         document.body.appendChild(statusDot);
@@ -394,10 +434,9 @@
         const setApiStatus = (isOk, msg) => {
             statusDot.style.backgroundColor = isOk ? '#10b981' : '#ef4444';
             statusDot.style.boxShadow = isOk ? '0 0 8px rgba(16, 185, 129, 0.6)' : '0 0 8px rgba(239, 68, 68, 0.6)';
-            statusDot.title = `FR24 API Status: ${msg} (${new Date().toLocaleTimeString('th-TH')})`;
+            statusDot.title = `API Status: ${msg} (${new Date().toLocaleTimeString('th-TH')})`;
         };
 
-        // Widget Elements
         const toggleBtn = document.createElement('div');
         toggleBtn.id = 'fr24-metar-toggle';
         toggleBtn.innerHTML = `🌤️ <span id="fr24-mini-apcode">${CURRENT_AIRPORT}</span>`;
@@ -427,13 +466,11 @@
         `;
         document.body.appendChild(widget);
 
-        // นำขนาด (Size) ที่บันทึกไว้มาใช้ตอนเปิด
         if (savedSize) {
             widget.style.width = savedSize.width + 'px';
             widget.style.height = savedSize.height + 'px';
         }
 
-        // นำตำแหน่ง (Position) ที่บันทึกไว้มาใช้
         if (savedPos) {
             const safeLeft = Math.max(0, Math.min(savedPos.left, window.innerWidth - 380));
             const safeTop = Math.max(0, Math.min(savedPos.top, window.innerHeight - 50));
@@ -443,7 +480,6 @@
             toggleBtn.style.right = 'auto'; toggleBtn.style.bottom = 'auto';
         }
 
-        // 🟢 ตรวจจับและบันทึกเวลาผู้ใช้ยืด/หด Widget
         const resizeObserver = new ResizeObserver(entries => {
             for (let entry of entries) {
                 if (widget.style.display !== 'none') {
@@ -456,7 +492,6 @@
         });
         resizeObserver.observe(widget);
 
-        // Dragging Logic
         let isDragging = false, hasDragged = false, startX, startY, initialLeft, initialTop;
         const header = widget.querySelector('.metar-header');
 
@@ -488,7 +523,6 @@
             if (isDragging) { isDragging = false; storage.set(POS_KEY, { left: widget.offsetLeft, top: widget.offsetTop }); }
         });
 
-        // Actions
         const minimizeBtn = widget.querySelector('.metar-minimize-btn');
         const refreshBtn = widget.querySelector('#fr24-metar-refresh');
         const editBtn = widget.querySelector('#fr24-metar-edit');
@@ -509,7 +543,7 @@
         });
 
         editBtn.addEventListener('click', () => {
-            const newCode = prompt("ใส่รหัส IATA สนามบินที่ต้องการ (เช่น BKK, CNX, HKT):", CURRENT_AIRPORT);
+            const newCode = prompt("ใส่รหัส ICAO หรือ IATA สนามบินที่ต้องการ (แนะนำ ICAO เช่น VTBS, VTCC, VTCT):", CURRENT_AIRPORT);
             if (newCode && newCode.trim() !== "" && newCode.trim().toUpperCase() !== CURRENT_AIRPORT) {
                 CURRENT_AIRPORT = newCode.trim().toUpperCase();
                 storage.set(AIRPORT_KEY, CURRENT_AIRPORT);
@@ -520,34 +554,59 @@
             }
         });
 
-        // Update Logic
-        const updateWidget = async () => {
-            if (document.hidden) { setApiStatus(true, "Paused (Tab Hidden)"); return; }
-            try {
-                const metar = await fetchFR24Weather(CURRENT_AIRPORT);
-                if (metar) {
-                    document.getElementById('fr24-metar-content').innerHTML = decodeMETARHTML(metar);
-                    document.getElementById('fr24-metar-updatetime').innerText = `(${new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute:'2-digit'})})`;
-                    setApiStatus(true, "Connected & Synced");
+        // =========================================================================
+        // Timer ตัวแปรสำหรับการสุ่มเวลารีเฟรช
+        // =========================================================================
+        let autoRefreshTimer;
 
-                    const currentState = storage.get(STATE_KEY, 'expanded');
-                    if (currentState === 'expanded') { widget.style.display = 'flex'; toggleBtn.style.display = 'none'; }
-                    else { widget.style.display = 'none'; toggleBtn.style.display = 'flex'; }
-                } else {
-                    document.getElementById('fr24-metar-content').innerHTML = `<div style="text-align:center; padding: 20px; color: #f87171;">ไม่พบข้อมูลสภาพอากาศสำหรับ ${CURRENT_AIRPORT}</div>`;
-                    if (storage.get(STATE_KEY, 'expanded') === 'expanded') widget.style.display = 'flex';
-                    setApiStatus(false, "No Data Returned");
+        const updateWidget = async () => {
+            if (document.hidden) {
+                setApiStatus(true, "Paused (Tab Hidden)");
+            } else {
+                try {
+                    const metar = await fetchWeather(CURRENT_AIRPORT);
+                    if (metar) {
+                        document.getElementById('fr24-metar-content').innerHTML = decodeMETARHTML(metar);
+                        document.getElementById('fr24-metar-updatetime').innerText = `(${new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute:'2-digit'})})`;
+                        setApiStatus(true, "Connected & Synced");
+
+                        const currentState = storage.get(STATE_KEY, 'expanded');
+                        if (currentState === 'expanded') { widget.style.display = 'flex'; toggleBtn.style.display = 'none'; }
+                        else { widget.style.display = 'none'; toggleBtn.style.display = 'flex'; }
+                    } else {
+                        document.getElementById('fr24-metar-content').innerHTML = `<div style="text-align:center; padding: 20px; color: #f87171;">ไม่พบข้อมูลสภาพอากาศสำหรับ ${CURRENT_AIRPORT}</div>`;
+                        if (storage.get(STATE_KEY, 'expanded') === 'expanded') widget.style.display = 'flex';
+                        setApiStatus(false, "No Data Returned");
+                    }
+                } catch (err) {
+                    console.error("METAR Error:", err);
+                    document.getElementById('fr24-metar-content').innerHTML = `<div style="text-align:center; padding: 20px; color: #f87171;">เกิดข้อผิดพลาดในการดึงข้อมูล</div>`;
+                    setApiStatus(false, err.message);
                 }
-            } catch (err) {
-                console.error("METAR Error:", err);
-                document.getElementById('fr24-metar-content').innerHTML = `<div style="text-align:center; padding: 20px; color: #f87171;">เกิดข้อผิดพลาดในการดึงข้อมูล</div>`;
-                setApiStatus(false, err.message);
             }
+
+            // เคลียร์ Timer เก่าทิ้งทุกครั้งที่อัปเดตเสร็จ
+            clearTimeout(autoRefreshTimer);
+
+            // สุ่มเวลา 4 ถึง 5 นาที (240,000 ถึง 300,000 ms)
+            const minMs = 240000;
+            const maxMs = 300000;
+            const randomDelay = Math.floor(Math.random() * (maxMs - minMs + 1) + minMs);
+
+            // ตั้งเวลาดึงข้อมูลรอบถัดไป
+            autoRefreshTimer = setTimeout(updateWidget, randomDelay);
         };
 
-        document.addEventListener('visibilitychange', () => { if (!document.hidden) updateWidget(); });
+        // หากผู้ใช้สลับกลับมาที่หน้าจอ ให้เคลียร์เวลาเดิมแล้วดึงข้อมูลใหม่ทันที
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                clearTimeout(autoRefreshTimer);
+                updateWidget();
+            }
+        });
+
+        // เริ่มทำงานครั้งแรก
         updateWidget();
-        setInterval(updateWidget, 600000); // 10 mins
     });
 
 })();
