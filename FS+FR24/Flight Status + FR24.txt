@@ -1,0 +1,423 @@
+// ==UserScript==
+// @name         Flight Status + FR24
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Flight Status with DIRECT FR24 API
+// @match        https://*.airportthai.co.th/*
+// @grant        GM_xmlhttpRequest
+// @connect      api.flightradar24.com
+// @run-at       document-idle
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let latestFlightData = {};
+    let observer;
+    let countdownElements =[];
+    let updateTimeout;
+
+    let hasAutoScrolled = false;
+    let lastUrl = window.location.href;
+
+    let currentFlightMode = window.location.href.includes('type=d') ? 'departures' : 'arrivals';
+
+    const hostname = window.location.hostname;
+    const airportMatch = hostname.match(/(suvarnabhumi|donmueang|chiangmai|chiangrai|phuket|hatyai)/i);
+    const airportKey = airportMatch ? airportMatch[1].toLowerCase() : 'suvarnabhumi';
+
+    const airportCodes = {
+        'suvarnabhumi': 'bkk', 'donmueang': 'dmk', 'chiangmai': 'cnx',
+        'chiangrai': 'cei', 'phuket': 'hkt', 'hatyai': 'hdy'
+    };
+    const airportCode = airportCodes[airportKey] || 'bkk';
+
+    const injectStyles = () => {
+        if (document.getElementById('fs-custom-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'fs-custom-styles';
+        style.innerHTML = `
+            /* Modern Status Badge */
+            .fs-status-badge {
+                padding: 18px 16px !important; /* ปรับความสูงกล่องตรงนี้ (เดิม 6px เปลี่ยนเป็น 10px) */
+                min-width: 120px !important;
+                display: inline-flex !important;
+                align-items: center;
+                justify-content: center;
+                border-radius: 50px !important;
+                font-weight: 700 !important;
+                font-size: 0.9rem !important;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                color: #ffffff !important;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                transition: transform 0.2s ease, box-shadow 0.2s ease;
+                white-space: nowrap !important;
+            }
+            .fs-status-badge:hover {
+                transform: translateY(-2px);
+            }
+
+            /* Color Themes */
+            .fs-badge-green { background: linear-gradient(135deg, #10b981, #059669) !important; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35); }
+            .fs-badge-blue { background: linear-gradient(135deg, #3b82f6, #2563eb) !important; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35); }
+            .fs-badge-sky { background: linear-gradient(135deg, #0ea5e9, #0284c7) !important; box-shadow: 0 4px 12px rgba(14, 165, 233, 0.35); }
+            .fs-badge-orange { background: linear-gradient(135deg, #f59e0b, #d97706) !important; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.35); }
+            .fs-badge-red { background: linear-gradient(135deg, #ef4444, #dc2626) !important; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35); }
+            .fs-badge-purple { background: linear-gradient(135deg, #8b5cf6, #7c3aed) !important; box-shadow: 0 4px 12px rgba(139, 92, 246, 0.35); }
+            .fs-badge-gray { background: linear-gradient(135deg, #6b7280, #4b5563) !important; box-shadow: 0 4px 12px rgba(107, 114, 128, 0.35); }
+
+            /* Time Typography */
+            .fs-time-col { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+            .fs-time-main { min-height: 36px; display: flex; align-items: center; justify-content: center; font-size: 2rem !important; font-weight: 800 !important; font-family: 'Roboto', sans-serif; line-height: 1; margin-bottom: 4px; white-space: nowrap; }
+            .fs-time-sub { min-height: 20px; display: flex; align-items: center; justify-content: center; white-space: nowrap; line-height: 1; font-size: 0.9rem; }
+            .fs-text-black { color: #1f2937 !important; }
+            .fs-text-green { color: #10b981 !important; }
+            .fs-text-orange { color: #f59e0b !important; }
+
+            /* API Indicator */
+            .fs-api-status-dot { position: fixed; bottom: 15px; right: 15px; width: 12px; height: 12px; border-radius: 50%; box-shadow: 0 0 8px rgba(0,0,0,0.3); z-index: 9999; cursor: pointer; transition: background-color 0.3s; background-color: #6b7280; }
+        `;
+        document.head.appendChild(style);
+    };
+    injectStyles();
+
+    const statusDot = document.createElement('div');
+    statusDot.className = 'fs-api-status-dot';
+    statusDot.title = "FR24 API Status: Waiting...";
+    document.body.appendChild(statusDot);
+
+    const setApiStatus = (isOk, msg) => {
+        statusDot.style.backgroundColor = isOk ? '#10b981' : '#ef4444';
+        statusDot.title = `FR24 API Status: ${msg} (${new Date().toLocaleTimeString('th-TH')})`;
+    };
+
+    const getFormatter = (options) => new Intl.DateTimeFormat('en-GB', { ...options, timeZone: 'Asia/Bangkok' });
+    const timeFormatter = getFormatter({ hour: '2-digit', minute: '2-digit' });
+    const dateFormatter = getFormatter({ day: '2-digit', month: 'short', year: 'numeric' });
+
+    const parseBangkokTime = (dateStr, timeStr) => {
+        const months = {
+            'Jan':0, 'Feb':1, 'Mar':2, 'Apr':3, 'May':4, 'Jun':5, 'Jul':6, 'Aug':7, 'Sep':8, 'Oct':9, 'Nov':10, 'Dec':11,
+            'ม.ค.':0, 'ก.พ.':1, 'มี.ค.':2, 'เม.ย.':3, 'พ.ค.':4, 'มิ.ย.':5, 'ก.ค.':6, 'ส.ค.':7, 'ก.ย.':8, 'ต.ค.':9, 'พ.ย.':10, 'ธ.ค.':11
+        };
+        const dateParts = dateStr.match(/(\d{1,2})\s+([A-Za-z]{3}|[ก-๙\.]+)\s+(\d{4})/);
+        const timeParts = timeStr.split(':');
+
+        if (dateParts && timeParts.length === 2) {
+            const monthIdx = months[dateParts[2]];
+            if (monthIdx === undefined) return null;
+
+            let year = parseInt(dateParts[3]);
+            if (year > 2500) year -= 543;
+
+            return Date.UTC( year, monthIdx, parseInt(dateParts[1]), parseInt(timeParts[0]) - 7, parseInt(timeParts[1]) );
+        }
+        return null;
+    };
+
+    const getStatusStyleClass = (text) => {
+        if (!text) return 'fs-badge-gray';
+        text = text.toUpperCase();
+        if (text.match(/LANDED|DEPARTED|ARRIVED|ON TIME|ถึงแล้ว|ออกเดินทาง/)) return 'fs-badge-green';
+        if (text.match(/CONFIRMED|OPEN|CK-IN OPEN|GATE OPEN/)) return 'fs-badge-blue';
+        if (text.match(/BOARDING/)) return 'fs-badge-sky';
+        if (text.match(/DELAYED|NEW GATE|ESTIMATED|EST/)) return 'fs-badge-orange';
+        if (text.match(/CANCELLED|ยกเลิก/)) return 'fs-badge-red';
+        if (text.match(/GATE CLOSED|CK-IN CLOSED|FINAL CALL/)) return 'fs-badge-purple';
+        return 'fs-badge-gray';
+    };
+
+    const formatStatusCell = (cell) => {
+        if (!cell || cell.dataset.statusFormatted === "true") return;
+        const statusText = cell.innerText.trim();
+        if (statusText) {
+            const badgeClass = getStatusStyleClass(statusText);
+            cell.innerHTML = `<div class="fs-status-badge ${badgeClass}">${statusText}</div>`;
+            cell.dataset.statusFormatted = "true";
+        }
+    };
+
+    const formatDateTimeCell = (cell) => {
+        if (!cell) return;
+        const rawText = cell.innerText || cell.textContent;
+        const dateMatch = rawText.match(/(\d{1,2}\s\S+\s\d{4})/);
+        const timeMatch = rawText.match(/(\d{2}:\d{2})/);
+        if (timeMatch) {
+            cell.innerHTML = `<div class="fs-time-col"><div class="fs-time-main fs-text-black">${timeMatch[1]}</div><div class="fs-time-sub">${dateMatch ? dateMatch[1] : ""}</div></div>`;
+            cell.dataset.formatted = "true";
+        }
+    };
+
+    const injectApiTime = (cell, timestamp) => {
+        if (!cell || !timestamp) return;
+        const dateObj = new Date(timestamp);
+        cell.innerHTML = `<div class="fs-time-col"><div class="fs-time-main fs-text-green">${timeFormatter.format(dateObj)}</div><div class="fs-time-sub">${dateFormatter.format(dateObj)}</div></div>`;
+    };
+
+    const getCountdownText = (targetTime) => {
+        const diff = targetTime - Date.now();
+        if (diff <= 0) return "";
+        const hours = Math.floor(diff / (1000 * 60 * 60));
+        const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+        const secs = Math.floor((diff % (1000 * 60)) / 1000);
+
+        if (hours > 0) return `${hours}h ${mins}m`;
+        if (mins >= 10) return `${mins}m`;
+        if (mins > 0) return `${mins}m ${secs}s`;
+        return `${secs}s`;
+    };
+
+    const fetchFR24API = () => {
+        if (document.hidden) {
+            setApiStatus(true, "Paused (Tab Hidden)");
+            return;
+        }
+
+        const activeMode = window.location.href.includes('type=d') ? 'departures' : 'arrivals';
+        if (activeMode !== currentFlightMode) {
+            currentFlightMode = activeMode;
+            latestFlightData = {};
+        }
+
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const url = `https://api.flightradar24.com/common/v1/airport.json?code=${airportCode.toUpperCase()}&plugin[]=schedule&plugin-setting[schedule][mode]=${currentFlightMode}&plugin-setting[schedule][timestamp]=${currentTimestamp}&page=1&limit=100`;
+
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: url,
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept": "application/json",
+                "Referer": "https://www.flightradar24.com/",
+                "Origin": "https://www.flightradar24.com"
+            },
+            onload: function(response) {
+                if (response.status === 200) {
+                    try {
+                        const json = JSON.parse(response.responseText);
+                        const schedule = json?.result?.response?.airport?.pluginData?.schedule?.[currentFlightMode]?.data ||[];
+
+                        const newFlightData = {};
+                        const now = Date.now();
+
+                        schedule.forEach(item => {
+                            const flightNum = item.flight.identification?.number?.default;
+                            if (flightNum) {
+                                const timeData = item.flight.time;
+                                const schedType = currentFlightMode === 'arrivals' ? 'arrival' : 'departure';
+
+                                const scheduledMs = timeData.scheduled[schedType] * 1000;
+                                const estimatedMs = (timeData.estimated[schedType] || timeData.real[schedType]) ?
+                                           (timeData.estimated[schedType] || timeData.real[schedType]) * 1000 : null;
+
+                                const flightKey = flightNum.replace(/\s+/g, '').toUpperCase();
+
+                                if (!newFlightData[flightKey] || Math.abs(scheduledMs - now) < Math.abs(newFlightData[flightKey].scheduled - now)) {
+                                    newFlightData[flightKey] = { estimated: estimatedMs, scheduled: scheduledMs };
+                                }
+                            }
+                        });
+
+                        latestFlightData = newFlightData;
+                        setApiStatus(true, "Connected & Synced");
+                        debouncedUpdateTable();
+                    } catch(e) {
+                        setApiStatus(false, "JSON Parse Error");
+                    }
+                } else {
+                    setApiStatus(false, "HTTP Error " + response.status);
+                }
+            },
+            onerror: function() {
+                setApiStatus(false, "Network Error");
+            }
+        });
+    };
+
+    const debouncedUpdateTable = () => {
+        clearTimeout(updateTimeout);
+        updateTimeout = setTimeout(updateTable, 100);
+    };
+
+    const updateTable = () => {
+        if (observer) observer.disconnect();
+        countdownElements =[];
+
+        if (lastUrl !== window.location.href) {
+            hasAutoScrolled = false;
+            lastUrl = window.location.href;
+        }
+
+        const alertBox = document.querySelector('div[role="alert"].alert.alert-warning');
+        if (alertBox && (alertBox.textContent.includes('No Result') || alertBox.textContent.includes('ไม่พบข้อมูล'))) {
+            if (!hasAutoScrolled) {
+                alertBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                hasAutoScrolled = true;
+            }
+        }
+
+        const table = document.querySelector('table[class*="Flight_table_flight"]');
+        if (table) {
+            if (!hasAutoScrolled) {
+                table.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                hasAutoScrolled = true;
+            }
+
+            const theadRow = table.querySelector('thead tr');
+            if (theadRow) {
+                let headers = Array.from(theadRow.cells);
+                let origStatusIdx = table.dataset.origStatusIdx ? parseInt(table.dataset.origStatusIdx) : headers.findIndex(th => th.textContent.match(/STATUS|สถานะ/i));
+
+                if (origStatusIdx > 0 && !table.dataset.headersMoved) {
+                    table.dataset.origStatusIdx = origStatusIdx;
+                    theadRow.insertBefore(headers[origStatusIdx], headers[0]);
+                    table.dataset.headersMoved = "true";
+                    headers = Array.from(theadRow.cells);
+                }
+
+                const colIdx = {
+                    status: headers.findIndex(th => th.textContent.match(/STATUS|สถานะ/i)),
+                    scheduled: headers.findIndex(th => th.textContent.match(/SCHEDULED|กำหนดเวลา/i)),
+                    estimated: headers.findIndex(th => th.textContent.match(/ESTIMATED|เวลาที่คาด/i)),
+                    flightNum: headers.findIndex(th => th.textContent.match(/FLIGHT NUMBER|เที่ยวบิน/i))
+                };
+
+                const rows = table.querySelectorAll('tbody tr');
+                rows.forEach(row => {
+                    let cells = Array.from(row.cells);
+                    if (cells.length < 4) return;
+
+                    if (origStatusIdx > 0 && !row.dataset.columnsMoved) {
+                        if (cells[origStatusIdx]) {
+                            row.insertBefore(cells[origStatusIdx], cells[0]);
+                        }
+                        row.dataset.columnsMoved = "true";
+                        cells = Array.from(row.cells);
+                    }
+
+                    const statusCell = colIdx.status !== -1 ? cells[colIdx.status] : null;
+                    const schedCell = colIdx.scheduled !== -1 ? cells[colIdx.scheduled] : null;
+                    const estCell = colIdx.estimated !== -1 ? cells[colIdx.estimated] : null;
+                    const flightNumCell = colIdx.flightNum !== -1 ? cells[colIdx.flightNum] : null;
+
+                    let isFlightActive = true;
+
+                    if (statusCell) {
+                        formatStatusCell(statusCell);
+                        if (statusCell.textContent.match(/CANCELLED|LANDED|ARRIVED|DEPARTED|ยกเลิก|ออกเดินทาง|ถึงแล้ว/i)) {
+                            isFlightActive = false;
+                        }
+                    }
+
+                    if (schedCell && !schedCell.dataset.formatted) {
+                        formatDateTimeCell(schedCell);
+                    }
+
+                    if (flightNumCell && estCell) {
+                        if (!flightNumCell.dataset.cleanFlightNum) {
+                            const rawText = flightNumCell.innerText || flightNumCell.textContent;
+                            const match = rawText.match(/([A-Z0-9]{2,3}\s?\d{1,4}[A-Z]?)/i);
+                            if (match) {
+                                flightNumCell.dataset.cleanFlightNum = match[1].replace(/\s+/g, '').toUpperCase();
+                                if(!rawText.includes('h ') && !rawText.includes('m ') && !rawText.includes('s')) {
+                                    flightNumCell.dataset.originalHtml = flightNumCell.innerHTML;
+                                }
+                            }
+                        }
+
+                        const flightNum = flightNumCell.dataset.cleanFlightNum;
+                        let targetTime = null;
+                        let useApiTime = false;
+
+                        const rawEstText = estCell.innerText || estCell.textContent;
+                        const dateMatch = rawEstText.match(/(\d{1,2}\s\S+\s\d{4})/);
+                        const timeMatch = rawEstText.match(/(\d{2}:\d{2})/);
+
+                        if (dateMatch && timeMatch) {
+                            const parsedTime = parseBangkokTime(dateMatch[1], timeMatch[1]);
+                            if(parsedTime) targetTime = parsedTime;
+                        }
+
+                        if (flightNum && latestFlightData[flightNum]) {
+                            const apiData = latestFlightData[flightNum];
+                            if (apiData && apiData.estimated) {
+                                targetTime = apiData.estimated;
+                                useApiTime = true;
+                            }
+                        }
+
+                        if (useApiTime) {
+                            if (estCell.dataset.currentTimestamp !== String(targetTime)) {
+                                injectApiTime(estCell, targetTime);
+                                estCell.dataset.currentTimestamp = String(targetTime);
+                                estCell.dataset.apiInjected = "true";
+                            }
+                        } else if (!estCell.dataset.formatted && !estCell.dataset.apiInjected) {
+                            formatDateTimeCell(estCell);
+                        }
+
+                        if (isFlightActive && targetTime && !isNaN(targetTime)) {
+                            const countdownClass = useApiTime ? 'fs-text-green' : 'fs-text-black';
+                            let countdownEl = flightNumCell.querySelector('.flight-countdown');
+
+                            if (countdownEl) {
+                                if (countdownEl.getAttribute('data-target') !== String(targetTime)) {
+                                    countdownEl.setAttribute('data-target', targetTime);
+                                    countdownEl.className = `flight-countdown fs-time-main ${countdownClass}`;
+                                }
+                            } else if (flightNumCell.dataset.originalHtml) {
+                                const initialText = getCountdownText(targetTime);
+                                if (initialText) {
+                                    flightNumCell.innerHTML = `<div class="fs-time-col"><div class="flight-countdown fs-time-main ${countdownClass}" data-target="${targetTime}">${initialText}</div><div class="fs-time-sub">${flightNumCell.dataset.originalHtml}</div></div>`;
+                                    countdownEl = flightNumCell.querySelector('.flight-countdown');
+                                }
+                            }
+
+                            if(countdownEl) countdownElements.push({ el: countdownEl, target: targetTime, cell: flightNumCell });
+
+                        } else {
+                            if (flightNumCell.dataset.originalHtml && flightNumCell.innerHTML.includes('flight-countdown')) {
+                                flightNumCell.innerHTML = flightNumCell.dataset.originalHtml;
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        if (observer) observer.observe(document.body, { childList: true, subtree: true });
+    };
+
+    setInterval(() => {
+        countdownElements.forEach(item => {
+            const text = getCountdownText(item.target);
+            if (text) {
+                if(item.el.innerText !== text) item.el.innerText = text;
+            } else {
+                if (item.cell && item.cell.dataset.originalHtml) {
+                    item.cell.innerHTML = item.cell.dataset.originalHtml;
+                }
+            }
+        });
+    }, 1000);
+
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) fetchFR24API();
+    });
+
+    observer = new MutationObserver(debouncedUpdateTable);
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    setTimeout(fetchFR24API, 500);
+    setInterval(fetchFR24API, 88000);
+
+    const minReloadTime = 5 * 60 * 1000;
+    const maxReloadTime = 6 * 60 * 1000;
+    const randomReloadTime = Math.floor(Math.random() * (maxReloadTime - minReloadTime + 1)) + minReloadTime;
+
+    setTimeout(() => {
+        window.location.reload();
+    }, randomReloadTime);
+
+})();

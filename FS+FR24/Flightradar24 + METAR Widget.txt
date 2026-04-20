@@ -1,0 +1,553 @@
+// ==UserScript==
+// @name         Flightradar24 + METAR Widget
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Flightradar24 + METAR Widget
+// @match        *://www.flightradar24.com/*
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      api.flightradar24.com
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // =========================================================================
+    // 1. ระบบจัดการโฆษณาและ CSS Styles
+    // =========================================================================
+    GM_addStyle(`[data-pb-ad-wrapper], #pb-slot-fr24-map, #primisPlayerContainerDiv,
+        iframe[id^="google_ads_iframe"], #onetrust-consent-sdk,
+        aside[data-testid="sidebar__container"] article:not(.flex-1),
+        aside[data-testid="sidebar__container"] > div:not(.h-10),
+        div.absolute.inset-x-0.top-0.z-40,[data-testid="map__gradient-bg"] { display: none !important; }
+
+        #fr24-metar-toggle {
+            position: absolute; top: 70px; left: 10px; z-index: 2147483647;
+            background-color: rgba(30, 34, 41, 0.9); color: #60a5fa;
+            border: 1px solid #374151; padding: 8px 12px; border-radius: 8px;
+            cursor: grab; font-family: -apple-system, sans-serif; font-size: 14px;
+            font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            backdrop-filter: blur(8px); display: none; align-items: center; gap: 6px;
+            transition: background-color 0.2s, color 0.2s; user-select: none;
+        }
+        #fr24-metar-toggle:hover { background-color: rgba(42, 48, 60, 0.95); color: #93c5fd; }
+        #fr24-metar-toggle:active { cursor: grabbing; }
+
+        #fr24-metar-widget {
+            position: absolute; top: 70px; left: 10px; z-index: 2147483647;
+            background-color: rgba(24, 28, 36, 0.95); color: #d1d5db;
+            width: 380px; min-width: 300px; max-width: 95vw;
+            min-height: 200px; max-height: 90vh;
+            border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+            font-family: -apple-system, sans-serif; display: none;
+            flex-direction: column; border: 1px solid #374151; backdrop-filter: blur(10px);
+            overflow: hidden; resize: both; /* เพิ่มคุณสมบัติเพื่อให้ปรับขนาดได้ */
+        }
+
+        .fs-api-status-dot {
+            position: fixed; bottom: 24px; right: 24px; z-index: 2147483647;
+            width: 12px; height: 12px; border-radius: 50%; background-color: #fbbf24;
+            border: 2px solid #1f2937; box-shadow: 0 0 8px rgba(251, 191, 36, 0.6); cursor: help; transition: all 0.3s ease;
+        }
+
+        .metar-header {
+            background-color: rgba(36, 43, 56, 0.9); padding: 10px 14px; font-weight: bold; color: #f3f4f6;
+            border-bottom: 1px solid #374151; display: flex; justify-content: space-between; align-items: center;
+            font-size: 15px; cursor: grab; user-select: none;
+        }
+        .metar-header:active { cursor: grabbing; }
+
+        .metar-header-controls { display: flex; gap: 4px; }
+        .action-btn {
+            cursor: pointer; color: #9ca3af; padding: 4px; border-radius: 4px;
+            display: flex; align-items: center; justify-content: center; transition: 0.2s;
+        }
+        .action-btn:hover { background-color: #374151; color: #fff; }
+
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        .spin { animation: spin 1s linear infinite; color: #60a5fa !important; }
+
+        .metar-body {
+            padding: 14px;
+            flex: 1 1 auto; /* ปรับให้ขยายตามขนาดกล่อง Widget อัตโนมัติ */
+            overflow-y: auto;
+            min-height: 0;
+        }
+        .metar-body::-webkit-scrollbar { width: 6px; }
+        .metar-body::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.1); border-radius: 4px; }
+        .metar-body::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        .metar-body::-webkit-scrollbar-thumb:hover { background: #60a5fa; }
+
+        .metar-full-raw {
+            background: #111827; padding: 12px; border-radius: 6px; font-family: 'Courier New', monospace;
+            color: #facc15; font-size: 14px; line-height: 1.5; margin-bottom: 16px; border: 1px solid #374151;
+            word-break: break-word; box-shadow: inset 0 2px 4px rgba(0,0,0,0.2); font-weight: bold;
+        }
+
+        .metar-row { display: flex; gap: 12px; align-items: flex-start; padding-bottom: 14px; border-bottom: 1px dashed #374151; margin-bottom: 14px; }
+        .metar-row:last-child { border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
+        .metar-icon { width: 24px; text-align: center; font-size: 16px; margin-top: 2px; }
+        .metar-content { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+
+        .metar-item { display: flex; flex-direction: column; gap: 4px; }
+        .metar-item-raw { font-family: 'Courier New', monospace; color: #facc15; font-size: 12px; font-weight: bold; letter-spacing: 0.5px; background: #1e2430; padding: 4px 8px; border-radius: 4px; display: inline-block; width: fit-content; border: 1px solid #374151; }
+        .metar-item-decoded { color: #e5e7eb; font-size: 13px; line-height: 1.5; padding-left: 8px; border-left: 3px solid #3b82f6; margin-left: 2px; }
+        .rmk-box { background: #1f2937; padding: 8px; border-radius: 4px; font-size: 12px; color: #9ca3af; line-height: 1.4; border-left: 3px solid #f59e0b; }
+        .unknown-text { color: #f87171; font-style: italic; }
+    `);
+
+    // =========================================================================
+    // 2. ระบบ Observer กำจัดโฆษณา (กิน CPU น้อยลง)
+    // =========================================================================
+    const cleanAdsAndPromos = () => {
+        const sidebar = document.querySelector('aside[data-testid="sidebar__container"]');
+        if (sidebar) {
+            const mainArticle = sidebar.querySelector('article.flex-1');
+            if (mainArticle) {
+                const hasPromoLinks = mainArticle.querySelector('a[href*="/blog/"], a[href*="/commercial-services"]');
+                if (mainArticle.innerHTML.trim() === '' || hasPromoLinks) sidebar.style.setProperty('display', 'none', 'important');
+                else sidebar.style.removeProperty('display');
+            }
+        }
+        document.querySelectorAll('iframe[id^="google_ads"], div[id^="primis"]').forEach(f => f.remove());
+        document.querySelectorAll('button').forEach(btn => {
+            const text = btn.innerText.toLowerCase();
+            if (text === 'reload' || text.includes('continue')) btn.click();
+        });
+    };
+    const observer = new MutationObserver(() => cleanAdsAndPromos());
+    window.addEventListener('DOMContentLoaded', () => {
+        observer.observe(document.body, { childList: true, subtree: true });
+        cleanAdsAndPromos();
+    });
+    setTimeout(() => { window.location.reload(); }, 1740000);
+
+    // =========================================================================
+    // 3. Safe Storage (ป้องกัน LocalStorage พัง)
+    // =========================================================================
+    const storage = {
+        get: (key, defaultVal = null) => { try { const val = localStorage.getItem(key); return val !== null ? JSON.parse(val) : defaultVal; } catch(e) { return defaultVal; } },
+        set: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {} }
+    };
+
+    // =========================================================================
+    // 4. พจนานุกรมแปลรหัสสภาพอากาศ (สมบูรณ์)
+    // =========================================================================
+    const intensityMap = { '-': 'เบาบาง (Light)', '+': 'หนัก (Heavy)', 'VC': 'บริเวณใกล้เคียง (Vicinity)' };
+    const descriptorMap = { 'MI': 'ระดับต่ำ (Shallow)', 'PR': 'บางส่วน (Partial)', 'BC': 'เป็นหย่อมๆ (Patches)', 'DR': 'ลอยต่ำ (Low Drifting)', 'BL': 'ถูกพัดลอยขึ้นไป (Blowing)', 'SH': 'แบบซู่ (Showers)', 'TS': 'ฟ้าคะนอง (Thunderstorm)', 'FZ': 'เยือกแข็ง (Freezing)' };
+    const phenomenaMap = { 'DZ': 'ละอองฝน (Drizzle)', 'RA': 'ฝนตก (Rain)', 'SN': 'หิมะ (Snow)', 'SG': 'ละอองหิมะ (Snow Grains)', 'IC': 'ผลึกน้ำแข็ง', 'PL': 'น้ำแข็งฝอย', 'GR': 'ลูกเห็บ (Hail)', 'GS': 'ลูกเห็บขนาดเล็ก', 'UP': 'หยาดน้ำฟ้าไม่ทราบชนิด', 'BR': 'หมอกน้ำค้าง/หมอกบาง (Mist)', 'FG': 'หมอกหนา (Fog)', 'FU': 'ควัน (Smoke)', 'VA': 'เถ้าภูเขาไฟ (Volcanic Ash)', 'DU': 'ฝุ่น (Dust)', 'SA': 'ทราย (Sand)', 'HZ': 'ฟ้าหลัว (Haze)', 'PY': 'ละอองฉีดพ่น', 'PO': 'พายุหมุนฝุ่น/ทราย', 'SQ': 'ลมกระโชกแรงฉับพลัน (Squalls)', 'FC': 'พายุวงช้าง/ทอร์นาโด (Funnel Cloud)', 'SS': 'พายุทราย (Sandstorm)', 'DS': 'พายุฝุ่น (Duststorm)' };
+    const cloudMap = { 'SKC': 'ท้องฟ้าแจ่มใส (Clear)', 'CLR': 'ท้องฟ้าแจ่มใส (Clear)', 'NSC': 'ไม่มีเมฆนัยสำคัญ (No Significant Clouds)', 'NCD': 'ระบบตรวจไม่พบเมฆ', 'FEW': 'เมฆเล็กน้อย 1-2 ส่วน (Few)', 'SCT': 'เมฆกระจาย 3-4 ส่วน (Scattered)', 'BKN': 'เมฆมาก 5-7 ส่วน (Broken)', 'OVC': 'เมฆเต็มท้องฟ้า 8 ส่วน (Overcast)', 'VV': 'ทัศนวิสัยแนวดิ่ง (Vertical Visibility)' };
+    const trendMap = { 'BECMG': 'แนวโน้มเปลี่ยนเป็น (Becoming)', 'TEMPO': 'แนวโน้มชั่วคราว (Temporary)', 'NOSIG': 'ไม่มีการเปลี่ยนแปลงสภาพอากาศ (NOSIG)' };
+    const colorMap = { 'BLU': 'รหัสสีน้ำเงิน (ดีมาก)', 'WHT': 'รหัสสีขาว (ดี)', 'GRN': 'รหัสสีเขียว (ปกติ)', 'YLO': 'รหัสสีเหลือง (เฝ้าระวัง)', 'AMB': 'รหัสสีส้ม (เฝ้าระวัง)', 'RED': 'รหัสสีแดง (แย่)', 'BLACK': 'รหัสสีดำ (แย่มาก/สนามบินปิด)' };
+
+    // =========================================================================
+    // 5. ฟังก์ชันแปลผล METAR (อัปเกรด Edge Cases & Aviation Standard)
+    // =========================================================================
+    function decodeMETARHTML(metarString) {
+        if (!metarString) return "";
+
+        let processedString = metarString.replace(/(\d+)\s+(\d+\/\d+SM)/g, '$1-$2');
+
+        const tokens = processedString.trim().split(/\s+/);
+        let data = { station: null, time: null, auto: null, wind: null, vis: null, wx: [], recent: [], clouds:[], tempDew: null, pressure: null, trend: [], rvr: [], ws: [], runway:[], rmk: "", unknown:[] };
+        let currentSection = "MAIN";
+
+        tokens.forEach((token, index) => {
+            if (token === 'RMK') { currentSection = "RMK"; return; }
+            if (trendMap[token]) { currentSection = "TREND"; data.trend.push({ raw: token, decoded: trendMap[token] }); return; }
+            if (currentSection === "RMK") { data.rmk += token.replace('-', ' ') + " "; return; }
+
+            const probMatch = token.match(/^PROB(\d{2})$/);
+            if (probMatch) {
+                if (currentSection !== "TREND") currentSection = "TREND";
+                data.trend.push({ raw: token, decoded: `โอกาสเกิด ${probMatch[1]}% (Probability)` });
+                return;
+            }
+
+            if (currentSection === "TREND") {
+                const timeTrendMatch = token.match(/^(FM|TL|AT)(\d{2})(\d{2})$/);
+                if (timeTrendMatch) {
+                    let type = timeTrendMatch[1] === 'FM' ? 'ตั้งแต่เวลา' : timeTrendMatch[1] === 'TL' ? 'จนถึงเวลา' : 'ณ เวลา';
+                    data.trend.push({ raw: token, decoded: `${type} ${timeTrendMatch[2]}:${timeTrendMatch[3]} UTC` }); return;
+                }
+            }
+
+            if (index === 0 && /^[A-Z]{4}$/.test(token)) { data.station = { raw: token, decoded: `${token}` }; return; }
+            if (/^\d{6}Z$/.test(token)) { data.time = { raw: token, decoded: `วันที่ ${token.substring(0, 2)} เวลา ${token.substring(2, 4)}:${token.substring(4, 6)} UTC` }; return; }
+            if (token === 'AUTO') { data.auto = { raw: token, decoded: `ระบบอัตโนมัติ` }; return; }
+            if (token === 'COR') { data.auto = { raw: token, decoded: `แก้ไขข้อมูล (COR)` }; return; }
+
+            const windMatch = token.match(/^(\d{3}|VRB)(\d{2,3})(G(\d{2,3}))?(KT|MPS|KMH)$/);
+            if (windMatch) {
+                let wText = "";
+                if (windMatch[1] === '000' && Number(windMatch[2]) === 0) {
+                    wText = `ลมสงบ (Calm)`;
+                } else {
+                    const dir = windMatch[1] === 'VRB' ? 'แปรปรวน (VRB)' : `${windMatch[1]}°`;
+                    wText = `ทิศทาง ${dir} | ความเร็ว ${Number(windMatch[2])} ${windMatch[5]}`;
+                    if (windMatch[4]) wText += ` (กระโชกแรง ${Number(windMatch[4])} ${windMatch[5]})`;
+                }
+
+                if (currentSection === "TREND") data.trend.push({ raw: token, decoded: wText });
+                else data.wind = { raw: token, decoded: wText };
+                return;
+            }
+            const windVarMatch = token.match(/^(\d{3})V(\d{3})$/);
+            if (windVarMatch) {
+                if(!data.wind) data.wind = {raw: "", decoded: ""};
+                data.wind.raw += ` ${token}`;
+                data.wind.decoded += `<br>แปรปรวนระหว่างทิศ ${windVarMatch[1]}° ถึง ${windVarMatch[2]}°`; return;
+            }
+
+            const smMatch = token.match(/^(M|P)?(\d+(?:-\d+\/\d+)?|\d+\/\d+|\d+)SM$/);
+            if (smMatch) {
+                let val = smMatch[2].replace('-', ' ');
+                let mod = smMatch[1] === 'M' ? 'น้อยกว่า ' : smMatch[1] === 'P' ? 'มากกว่า ' : '';
+                let decoded = `${mod}${val} ไมล์บก (Statute Miles)`;
+                if (currentSection === "TREND") data.trend.push({ raw: token.replace('-', ' '), decoded: decoded });
+                else data.vis = { raw: token.replace('-', ' '), decoded: decoded };
+                return;
+            }
+
+            if (token === 'CAVOK') {
+                const cavokText = `CAVOK (ทัศนวิสัยดีมาก > 10 กม. ไม่มีเมฆต่ำ/อากาศร้าย)`;
+                if (currentSection === "TREND") data.trend.push({ raw: token, decoded: cavokText });
+                else data.vis = { raw: token, decoded: cavokText };
+                return;
+            }
+            const visMatch = token.match(/^(\d{4})(N|NE|E|SE|S|SW|W|NW|NDV)?$/);
+            if (visMatch) {
+                const visNum = Number(visMatch[1]);
+                let visText = visNum === 9999 ? 'มากกว่า 10 กิโลเมตร' : `${visNum} เมตร`;
+                if (visMatch[2]) {
+                    if (visMatch[2] === 'NDV') visText += ' <span style="color:#9ca3af;font-size:11px;">(NDV: เท่ากันทุกทิศทาง)</span>';
+                    else visText += ` ไปทางทิศ ${visMatch[2]}`;
+                }
+
+                if (currentSection === "TREND") data.trend.push({ raw: token, decoded: visText });
+                else data.vis = { raw: token, decoded: visText };
+                return;
+            }
+
+            if (token === 'NSW') {
+                if (currentSection === "TREND") data.trend.push({ raw: token, decoded: `ไม่มีสภาพอากาศมีนัยสำคัญ (No Significant Weather)` });
+                else data.wx.push({ raw: token, decoded: `ไม่มีสภาพอากาศมีนัยสำคัญ (No Significant Weather)` });
+                return;
+            }
+
+            const rvrMatch = token.match(/^R(\d{2}[LCR]?)\/([MP])?(\d{4})([VU])?(FT)?$/);
+            if (rvrMatch) {
+                const modifier = rvrMatch[2] === 'M' ? 'น้อยกว่า ' : rvrMatch[2] === 'P' ? 'มากกว่า ' : '';
+                data.rvr.push({ raw: token, decoded: `รันเวย์ ${rvrMatch[1]}: ${modifier}${rvrMatch[3]} ${rvrMatch[5] === 'FT' ? 'ฟุต' : 'เมตร'}` }); return;
+            }
+
+            const rwyCondMatch = token.match(/^R(\d{2}[LCR]?)\/([A-Z0-9/]{6})$/);
+            if (rwyCondMatch && !token.includes('V')) {
+                data.runway.push({ raw: token, decoded: `รันเวย์ ${rwyCondMatch[1]} รหัสสภาพพื้นผิว: ${rwyCondMatch[2]}` }); return;
+            }
+
+            if (token === 'WS') { data.ws.push({ raw: token, decoded: `แจ้งเตือนลมเฉือน (Wind Shear)` }); return; }
+            if (token.startsWith('RWY') && data.ws.length > 0) {
+                data.ws[data.ws.length - 1].raw += ` ${token}`;
+                data.ws[data.ws.length - 1].decoded += ` ที่รันเวย์ ${token.replace('RWY', '')}`; return;
+            }
+            if (token === 'ALL' && data.ws.length > 0) {
+                data.ws[data.ws.length - 1].raw += ` ALL RWY`;
+                data.ws[data.ws.length - 1].decoded += ` ทุกรันเวย์`; return;
+            }
+
+            if (token.startsWith('RE') && token.length >= 4) {
+                let wxCode = token.substring(2); let wxText = ""; let originalToken = token;
+                Object.keys(intensityMap).forEach(key => { if (wxCode.startsWith(key)) { wxText += intensityMap[key] + " "; wxCode = wxCode.replace(key, ""); }});
+                while(wxCode.length >= 2) {
+                    const chunk = wxCode.substring(0, 2);
+                    if (descriptorMap[chunk]) wxText += descriptorMap[chunk] + " ";
+                    else if (phenomenaMap[chunk]) wxText += phenomenaMap[chunk] + " ";
+                    wxCode = wxCode.substring(2);
+                }
+                if (wxText.trim().length > 0) { data.recent.push({ raw: originalToken, decoded: `เพิ่งมี ${wxText.trim()}` }); return; }
+            }
+
+            let wxCode = token, wxText = ""; let originalToken = token;
+            Object.keys(intensityMap).forEach(key => { if (wxCode.startsWith(key)) { wxText += intensityMap[key] + " "; wxCode = wxCode.replace(key, ""); } });
+            while(wxCode.length >= 2) {
+                const chunk = wxCode.substring(0, 2);
+                if (descriptorMap[chunk]) wxText += descriptorMap[chunk] + " ";
+                else if (phenomenaMap[chunk]) wxText += phenomenaMap[chunk] + " ";
+                wxCode = wxCode.substring(2);
+            }
+            if (wxText.trim().length > 0) {
+                if (currentSection === "TREND") data.trend.push({ raw: originalToken, decoded: wxText.trim() });
+                else data.wx.push({ raw: originalToken, decoded: wxText.trim() });
+                return;
+            }
+
+            const cloudMatch = token.match(/^(FEW|SCT|BKN|OVC|VV|SKC|CLR|NSC|NCD|\/\/\/)(\d{3}|\/\/\/)?([A-Z]{2,3})?$/);
+            if (cloudMatch) {
+                const type = cloudMatch[1] === '///' ? 'ไม่สามารถระบุชนิดเมฆได้' : cloudMap[cloudMatch[1]];
+                const height = (cloudMatch[2] && cloudMatch[2] !== '///') ? Number(cloudMatch[2]) * 100 : null;
+                const extra = cloudMatch[3] === 'CB' ? '<span style="color:#f87171;">(CB: เมฆฝนฟ้าคะนอง)</span>' : cloudMatch[3] === 'TCU' ? '<span style="color:#fbbf24;">(TCU: เมฆคิวมูลัสก่อตัวสูง)</span>' : '';
+
+                let decodedStr = `${type}`;
+                if (height) decodedStr += ` ที่ ${height} ฟุต`;
+                else if (cloudMatch[2] === '///') decodedStr += ` (ไม่สามารถระบุความสูงได้)`;
+                decodedStr += ` ${extra}`;
+
+                if (currentSection === "TREND") data.trend.push({ raw: token, decoded: decodedStr.trim() });
+                else data.clouds.push({ raw: token, decoded: decodedStr.trim() });
+                return;
+            }
+
+            const tempMatch = token.match(/^(M)?(\d{2})\/(M)?(\d{2})$/);
+            if (tempMatch) {
+                const temp = tempMatch[1] === 'M' ? -Number(tempMatch[2]) : Number(tempMatch[2]);
+                const dew = tempMatch[3] === 'M' ? -Number(tempMatch[4]) : Number(tempMatch[4]);
+                data.tempDew = { raw: token, decoded: `อุณหภูมิ ${temp}°C | จุดน้ำค้าง ${dew}°C` }; return;
+            }
+
+            const altMatch = token.match(/^(Q|A)(\d{4})$/);
+            if (altMatch) { data.pressure = { raw: token, decoded: altMatch[1] === 'Q' ? `${Number(altMatch[2])} hPa` : `${(Number(altMatch[2])/100).toFixed(2)} inHg` }; return; }
+
+            if (colorMap[token]) {
+                data.rmk += `<br>[${colorMap[token]}] `; return;
+            }
+
+            data.unknown.push({ raw: token.replace('-', ' '), decoded: `<span class="unknown-text">ไม่ได้แปล</span>` });
+        });
+
+        const buildRow = (icon, labelPrefix, itemOrArray) => {
+            if (!itemOrArray || (Array.isArray(itemOrArray) && itemOrArray.length === 0)) return '';
+            const items = Array.isArray(itemOrArray) ? itemOrArray : [itemOrArray];
+            let contentHtml = '';
+            items.forEach(it => { contentHtml += `<div class="metar-item"><div class="metar-item-raw">${it.raw.trim()}</div><div class="metar-item-decoded"><b>${labelPrefix}</b> ${it.decoded}</div></div>`; });
+            return `<div class="metar-row"><div class="metar-icon">${icon}</div><div class="metar-content">${contentHtml}</div></div>`;
+        };
+
+        let html = `<div class="metar-full-raw">${metarString}</div>`;
+
+        if (data.station && data.time) {
+            const combined = { raw: `${data.station.raw} ${data.time.raw} ${data.auto ? data.auto.raw : ''}`, decoded: `${data.station.decoded} | ${data.time.decoded} ${data.auto ? ' (ระบบอัตโนมัติ)' : ''}` };
+            html += buildRow("📍", "", combined);
+        } else if (data.station) { html += buildRow("📍", "สถานี", data.station); }
+        else if (data.time) { html += buildRow("🕒", "เวลา", data.time); }
+
+        html += buildRow("💨", "ลม", data.wind);
+        html += buildRow("👁️", "ทัศนวิสัย", data.vis);
+        html += buildRow("🛫", "ทัศนวิสัย RVR", data.rvr);
+        html += buildRow("🛣️", "สถานะพื้นผิว", data.runway);
+        html += buildRow("⚠️", "สภาพอากาศ", data.recent);
+        html += buildRow("🌧️", "สภาพอากาศ", data.wx);
+        html += buildRow("☁️", "เมฆ", data.clouds);
+        html += buildRow("🌡️", "อุณหภูมิ", data.tempDew);
+        html += buildRow("📉", "ความกดอากาศ", data.pressure);
+        html += buildRow("🌪️", "ลมเฉือน", data.ws);
+        html += buildRow("⏳", "แนวโน้ม", data.trend);
+        html += buildRow("❓", "อื่นๆ", data.unknown);
+
+        if (data.rmk.trim() !== "") {
+            html += `<div class="metar-row"><div class="metar-icon">📝</div><div class="metar-content"><div class="metar-item"><div class="metar-item-raw" style="color: #facc15;">RMK</div><div class="rmk-box">${data.rmk.trim()}</div></div></div></div>`;
+        }
+        return html;
+    }
+
+
+    // =========================================================================
+    // 6. API Fetch
+    // =========================================================================
+    function fetchFR24Weather(airportCode) {
+        return new Promise((resolve, reject) => {
+            const url = `https://api.flightradar24.com/common/v1/airport.json?code=${airportCode}&plugin[]=weather`;
+            GM_xmlhttpRequest({
+                method: "GET", url: url,
+                headers: { "User-Agent": navigator.userAgent, "Accept": "application/json", "Referer": "https://www.flightradar24.com/", "Origin": "https://www.flightradar24.com" },
+                onload: (res) => {
+                    if (res.status === 200) {
+                        try { resolve(JSON.parse(res.responseText)?.result?.response?.airport?.pluginData?.weather?.metar); }
+                        catch(e) { reject(new Error("Parse Error")); }
+                    } else reject(new Error(`HTTP ${res.status}`));
+                },
+                onerror: () => reject(new Error("Network Error"))
+            });
+        });
+    }
+
+    // =========================================================================
+    // 7. UI Creation & Logic
+    // =========================================================================
+    window.addEventListener('load', () => {
+        const AIRPORT_KEY = 'fr24_target_airport';
+        let CURRENT_AIRPORT = storage.get(AIRPORT_KEY, 'CEI');
+
+        const POS_KEY = 'fr24_metar_pos';
+        const STATE_KEY = 'fr24_metar_state';
+        const SIZE_KEY = 'fr24_metar_size'; // คีย์สำหรับจำขนาดหน้าต่าง
+
+        const savedPos = storage.get(POS_KEY);
+        const savedSize = storage.get(SIZE_KEY); // ดึงขนาดที่เซฟไว้
+
+        // Status Dot
+        const statusDot = document.createElement('div');
+        statusDot.className = 'fs-api-status-dot';
+        document.body.appendChild(statusDot);
+
+        const setApiStatus = (isOk, msg) => {
+            statusDot.style.backgroundColor = isOk ? '#10b981' : '#ef4444';
+            statusDot.style.boxShadow = isOk ? '0 0 8px rgba(16, 185, 129, 0.6)' : '0 0 8px rgba(239, 68, 68, 0.6)';
+            statusDot.title = `FR24 API Status: ${msg} (${new Date().toLocaleTimeString('th-TH')})`;
+        };
+
+        // Widget Elements
+        const toggleBtn = document.createElement('div');
+        toggleBtn.id = 'fr24-metar-toggle';
+        toggleBtn.innerHTML = `🌤️ <span id="fr24-mini-apcode">${CURRENT_AIRPORT}</span>`;
+        document.body.appendChild(toggleBtn);
+
+        const widget = document.createElement('div');
+        widget.id = 'fr24-metar-widget';
+        widget.innerHTML = `
+            <div class="metar-header">
+                <span style="display:flex; align-items:center; gap:6px;">
+                    🌤️ <span id="fr24-header-apcode" style="color:#facc15;">${CURRENT_AIRPORT}</span>
+                    <span id="fr24-metar-updatetime" style="font-size: 11px; font-weight: normal; color: #9ca3af; margin-left: 4px;"></span>
+                </span>
+                <div class="metar-header-controls">
+                    <div class="action-btn" id="fr24-metar-edit" title="เปลี่ยนสนามบิน">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </div>
+                    <div class="action-btn" id="fr24-metar-refresh" title="รีเฟรชข้อมูล">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                    </div>
+                    <div class="action-btn metar-minimize-btn" title="ย่อหน้าต่าง">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 15l-6-6-6 6"/></svg>
+                    </div>
+                </div>
+            </div>
+            <div class="metar-body" id="fr24-metar-content"></div>
+        `;
+        document.body.appendChild(widget);
+
+        // นำขนาด (Size) ที่บันทึกไว้มาใช้ตอนเปิด
+        if (savedSize) {
+            widget.style.width = savedSize.width + 'px';
+            widget.style.height = savedSize.height + 'px';
+        }
+
+        // นำตำแหน่ง (Position) ที่บันทึกไว้มาใช้
+        if (savedPos) {
+            const safeLeft = Math.max(0, Math.min(savedPos.left, window.innerWidth - 380));
+            const safeTop = Math.max(0, Math.min(savedPos.top, window.innerHeight - 50));
+            widget.style.left = safeLeft + 'px'; widget.style.top = safeTop + 'px';
+            toggleBtn.style.left = safeLeft + 'px'; toggleBtn.style.top = safeTop + 'px';
+            widget.style.right = 'auto'; widget.style.bottom = 'auto';
+            toggleBtn.style.right = 'auto'; toggleBtn.style.bottom = 'auto';
+        }
+
+        // 🟢 ตรวจจับและบันทึกเวลาผู้ใช้ยืด/หด Widget
+        const resizeObserver = new ResizeObserver(entries => {
+            for (let entry of entries) {
+                if (widget.style.display !== 'none') {
+                    storage.set(SIZE_KEY, {
+                        width: entry.target.offsetWidth,
+                        height: entry.target.offsetHeight
+                    });
+                }
+            }
+        });
+        resizeObserver.observe(widget);
+
+        // Dragging Logic
+        let isDragging = false, hasDragged = false, startX, startY, initialLeft, initialTop;
+        const header = widget.querySelector('.metar-header');
+
+        const startDrag = (e, moveEl) => {
+            if(e.target.closest('.action-btn')) return;
+            isDragging = true; hasDragged = false;
+            startX = e.clientX; startY = e.clientY;
+            initialLeft = moveEl.offsetLeft; initialTop = moveEl.offsetTop;
+            widget.style.right = 'auto'; widget.style.bottom = 'auto';
+            toggleBtn.style.right = 'auto'; toggleBtn.style.bottom = 'auto';
+        };
+
+        header.addEventListener('mousedown', (e) => startDrag(e, widget));
+        toggleBtn.addEventListener('mousedown', (e) => startDrag(e, toggleBtn));
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            hasDragged = true;
+            const dx = e.clientX - startX; const dy = e.clientY - startY;
+            const elWidth = widget.style.display === 'flex' ? widget.offsetWidth : toggleBtn.offsetWidth;
+            const elHeight = widget.style.display === 'flex' ? widget.offsetHeight : toggleBtn.offsetHeight;
+            const newLeft = Math.max(0, Math.min(initialLeft + dx, window.innerWidth - elWidth));
+            const newTop = Math.max(0, Math.min(initialTop + dy, window.innerHeight - elHeight));
+            widget.style.left = `${newLeft}px`; widget.style.top = `${newTop}px`;
+            toggleBtn.style.left = `${newLeft}px`; toggleBtn.style.top = `${newTop}px`;
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) { isDragging = false; storage.set(POS_KEY, { left: widget.offsetLeft, top: widget.offsetTop }); }
+        });
+
+        // Actions
+        const minimizeBtn = widget.querySelector('.metar-minimize-btn');
+        const refreshBtn = widget.querySelector('#fr24-metar-refresh');
+        const editBtn = widget.querySelector('#fr24-metar-edit');
+        const refreshIcon = refreshBtn.querySelector('svg');
+
+        minimizeBtn.addEventListener('click', () => {
+            widget.style.display = 'none'; toggleBtn.style.display = 'flex'; storage.set(STATE_KEY, 'minimized');
+        });
+
+        toggleBtn.addEventListener('click', (e) => {
+            if (hasDragged) { hasDragged = false; return; }
+            toggleBtn.style.display = 'none'; widget.style.display = 'flex'; storage.set(STATE_KEY, 'expanded');
+        });
+
+        refreshBtn.addEventListener('click', () => {
+            refreshIcon.classList.add('spin');
+            updateWidget().finally(() => setTimeout(() => refreshIcon.classList.remove('spin'), 500));
+        });
+
+        editBtn.addEventListener('click', () => {
+            const newCode = prompt("ใส่รหัส IATA สนามบินที่ต้องการ (เช่น BKK, CNX, HKT):", CURRENT_AIRPORT);
+            if (newCode && newCode.trim() !== "" && newCode.trim().toUpperCase() !== CURRENT_AIRPORT) {
+                CURRENT_AIRPORT = newCode.trim().toUpperCase();
+                storage.set(AIRPORT_KEY, CURRENT_AIRPORT);
+                document.getElementById('fr24-header-apcode').innerText = CURRENT_AIRPORT;
+                document.getElementById('fr24-mini-apcode').innerText = CURRENT_AIRPORT;
+                document.getElementById('fr24-metar-content').innerHTML = `<div style="text-align:center; padding: 20px; color: #9ca3af;">กำลังค้นหาข้อมูลของ ${CURRENT_AIRPORT}...</div>`;
+                updateWidget();
+            }
+        });
+
+        // Update Logic
+        const updateWidget = async () => {
+            if (document.hidden) { setApiStatus(true, "Paused (Tab Hidden)"); return; }
+            try {
+                const metar = await fetchFR24Weather(CURRENT_AIRPORT);
+                if (metar) {
+                    document.getElementById('fr24-metar-content').innerHTML = decodeMETARHTML(metar);
+                    document.getElementById('fr24-metar-updatetime').innerText = `(${new Date().toLocaleTimeString('th-TH', {hour: '2-digit', minute:'2-digit'})})`;
+                    setApiStatus(true, "Connected & Synced");
+
+                    const currentState = storage.get(STATE_KEY, 'expanded');
+                    if (currentState === 'expanded') { widget.style.display = 'flex'; toggleBtn.style.display = 'none'; }
+                    else { widget.style.display = 'none'; toggleBtn.style.display = 'flex'; }
+                } else {
+                    document.getElementById('fr24-metar-content').innerHTML = `<div style="text-align:center; padding: 20px; color: #f87171;">ไม่พบข้อมูลสภาพอากาศสำหรับ ${CURRENT_AIRPORT}</div>`;
+                    if (storage.get(STATE_KEY, 'expanded') === 'expanded') widget.style.display = 'flex';
+                    setApiStatus(false, "No Data Returned");
+                }
+            } catch (err) {
+                console.error("METAR Error:", err);
+                document.getElementById('fr24-metar-content').innerHTML = `<div style="text-align:center; padding: 20px; color: #f87171;">เกิดข้อผิดพลาดในการดึงข้อมูล</div>`;
+                setApiStatus(false, err.message);
+            }
+        };
+
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) updateWidget(); });
+        updateWidget();
+        setInterval(updateWidget, 600000); // 10 mins
+    });
+
+})();
