@@ -14,8 +14,44 @@
 (function() {
     'use strict';
 
+    const storage = {
+        get: (key, defaultVal = null) => { try { const val = localStorage.getItem(key); return val !== null ? JSON.parse(val) : defaultVal; } catch(e) { return defaultVal; } },
+        set: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {} }
+    };
+
+    const SCRIPT_ENABLED_KEY = 'fr24_script_enabled';
+    let isScriptEnabled = storage.get(SCRIPT_ENABLED_KEY, true);
+    let keyBuffer = '';
+    const secretCode = '!!!!!';
+
+    document.addEventListener('keydown', (e) => {
+
+        if (e.key && e.key.length === 1) {
+            keyBuffer += e.key;
+
+            if (keyBuffer.length > secretCode.length) {
+                keyBuffer = keyBuffer.slice(-secretCode.length);
+            }
+
+            if (keyBuffer.toUpperCase() === secretCode) {
+                isScriptEnabled = !isScriptEnabled;
+                storage.set(SCRIPT_ENABLED_KEY, isScriptEnabled);
+
+                alert(`[FR24 METAR Widget]\nSTATUS : ${isScriptEnabled ? '🟢 Enabled' : '🔴 Disabled'}\n\nReloading...`);
+                window.location.reload();
+            }
+        }
+    });
+
+    if (!isScriptEnabled) {
+        console.log("[FR24 METAR Script] is disabled.");
+        return;
+    }
+
+    console.log("[FR24 METAR Script] is enabled.");
+
     // =========================================================================
-    // 1. ระบบจัดการโฆษณาและ CSS Styles
+    // 3. ระบบจัดการโฆษณาและ CSS Styles
     // =========================================================================
     GM_addStyle(`[data-pb-ad-wrapper], #pb-slot-fr24-map, #primisPlayerContainerDiv,
         iframe[id^="google_ads_iframe"], #onetrust-consent-sdk,
@@ -99,7 +135,7 @@
     `);
 
     // =========================================================================
-    // 2. ระบบ Observer กำจัดโฆษณา (กิน CPU น้อยลง)
+    // 4. ระบบ Observer กำจัดโฆษณา (กิน CPU น้อยลง)
     // =========================================================================
     const cleanAdsAndPromos = () => {
         const sidebar = document.querySelector('aside[data-testid="sidebar__container"]');
@@ -125,15 +161,7 @@
     setTimeout(() => { window.location.reload(); }, 1740000);
 
     // =========================================================================
-    // 3. Safe Storage (ป้องกัน LocalStorage พัง)
-    // =========================================================================
-    const storage = {
-        get: (key, defaultVal = null) => { try { const val = localStorage.getItem(key); return val !== null ? JSON.parse(val) : defaultVal; } catch(e) { return defaultVal; } },
-        set: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {} }
-    };
-
-    // =========================================================================
-    // 4. พจนานุกรมแปลรหัสสภาพอากาศ (สมบูรณ์)
+    // 5. พจนานุกรมแปลรหัสสภาพอากาศ
     // =========================================================================
     const intensityMap = { '-': 'เบาบาง (Light)', '+': 'หนัก (Heavy)', 'VC': 'บริเวณใกล้เคียง (Vicinity)' };
     const descriptorMap = { 'MI': 'ระดับต่ำ (Shallow)', 'PR': 'บางส่วน (Partial)', 'BC': 'เป็นหย่อมๆ (Patches)', 'DR': 'ลอยต่ำ (Low Drifting)', 'BL': 'ถูกพัดลอยขึ้นไป (Blowing)', 'SH': 'แบบซู่ (Showers)', 'TS': 'ฟ้าคะนอง (Thunderstorm)', 'FZ': 'เยือกแข็ง (Freezing)' };
@@ -143,7 +171,7 @@
     const colorMap = { 'BLU': 'รหัสสีน้ำเงิน (ดีมาก)', 'WHT': 'รหัสสีขาว (ดี)', 'GRN': 'รหัสสีเขียว (ปกติ)', 'YLO': 'รหัสสีเหลือง (เฝ้าระวัง)', 'AMB': 'รหัสสีส้ม (เฝ้าระวัง)', 'RED': 'รหัสสีแดง (แย่)', 'BLACK': 'รหัสสีดำ (แย่มาก/สนามบินปิด)' };
 
     // =========================================================================
-    // 5. ฟังก์ชันแปลผล METAR (อัปเกรด Edge Cases & Aviation Standard)
+    // 6. ฟังก์ชันแปลผล METAR (อัปเกรด Edge Cases & Aviation Standard)
     // =========================================================================
     function decodeMETARHTML(metarString) {
         if (!metarString) return "";
@@ -357,7 +385,7 @@
     }
 
     // =========================================================================
-    // 6. API Fetch (Primary: AWC, Fallback: FR24)
+    // 7. API Fetch (Primary: AWC, Fallback: FR24)
     // =========================================================================
     function fetchAWCWeather(code) {
         return new Promise((resolve, reject) => {
@@ -414,7 +442,7 @@
     }
 
     // =========================================================================
-    // 7. UI Creation & Logic
+    // 8. UI Creation & Logic
     // =========================================================================
     window.addEventListener('load', () => {
         const AIRPORT_KEY = 'fr24_target_airport';

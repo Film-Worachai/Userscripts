@@ -27,7 +27,7 @@
             typedCode = typedCode.slice(-5);
         }
 
-        if (typedCode.toUpperCase() === '!VTCT') {
+        if (typedCode.toUpperCase() === '!!!!!') {
             isScriptEnabled = !isScriptEnabled;
             GM_setValue('fs_script_enabled', isScriptEnabled); // บันทึกค่าลงหน่วยความจำ
             
@@ -37,7 +37,7 @@
     });
 
     if (!isScriptEnabled) {
-        console.log("Flight Status + FR24 is currently DISABLED. Type !VTCT to enable.");
+        console.log("Flight Status + FR24 is currently DISABLED.");
         return; 
     }
 
