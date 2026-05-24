@@ -5,12 +5,41 @@
 // @description  Flight Status with DIRECT FR24 API
 // @match        https://*.airportthai.co.th/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @connect      api.flightradar24.com
 // @run-at       document-idle
 // ==/UserScript==
 
 (function() {
     'use strict';
+
+    let isScriptEnabled = GM_getValue('fs_script_enabled', true);
+    let typedCode = "";
+
+    document.addEventListener('keydown', (e) => {
+        const targetTag = e.target.tagName.toLowerCase();
+        if (targetTag === 'input' || targetTag === 'textarea') return;
+
+        typedCode += e.key;
+        
+        if (typedCode.length > 5) {
+            typedCode = typedCode.slice(-5);
+        }
+
+        if (typedCode.toUpperCase() === '!VTCT') {
+            isScriptEnabled = !isScriptEnabled;
+            GM_setValue('fs_script_enabled', isScriptEnabled); // บันทึกค่าลงหน่วยความจำ
+            
+            alert(`🛠️ Flight Status + FR24 Script is now [ ${isScriptEnabled ? 'ENABLED' : 'DISABLED'} ]\nReloading...`);
+            window.location.reload();
+        }
+    });
+
+    if (!isScriptEnabled) {
+        console.log("Flight Status + FR24 is currently DISABLED. Type !VTCT to enable.");
+        return; 
+    }
 
     let latestFlightData = {};
     let observer;
