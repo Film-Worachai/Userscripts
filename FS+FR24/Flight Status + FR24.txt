@@ -68,7 +68,7 @@
         style.innerHTML = `
             .fs-status-badge {
                 padding: 18px 16px !important; 
-                min-width: 120px !important;
+                min-width: 140px !important;
                 display: inline-flex !important;
                 align-items: center;
                 justify-content: center;
