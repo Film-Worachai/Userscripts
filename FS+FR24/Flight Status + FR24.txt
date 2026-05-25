@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Flight Status + FR24
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.0
 // @description  Flight Status with FR24
 // @match        https://*.airportthai.co.th/*
 // @grant        GM_xmlhttpRequest
@@ -310,6 +310,8 @@
         countdownElements =[];
 
         const existingAOTFlights = new Set();
+        const nowMs = Date.now();
+        const validTimeWindow = 7 * 60 * 60 * 1000;
 
         if (lastUrl !== window.location.href) {
             hasAutoScrolled = false;
@@ -322,6 +324,10 @@
             }
         }
 
+        const validFR24Flights = Object.values(latestFlightData).filter(frFlight => {
+            return frFlight.estimated && Math.abs(frFlight.scheduled - nowMs) <= validTimeWindow;
+        });
+
         const alertBox = document.querySelector('div[role="alert"].alert.alert-warning');
         
         if (alertBox && (alertBox.textContent.includes('No Result') || alertBox.textContent.includes('ไม่พบข้อมูล'))) {
@@ -330,7 +336,7 @@
                 hasAutoScrolled = true;
             }
 
-            if (Object.keys(latestFlightData).length > 0) {
+            if (validFR24Flights.length > 0) {
                 alertBox.style.display = 'none';
 
                 let customWrapper = document.getElementById('fs-custom-fr24-wrapper');
@@ -364,6 +370,10 @@
                     customWrapper.appendChild(customTable);
                     alertBox.parentNode.insertBefore(customWrapper, alertBox.nextSibling);
                 }
+            } else {
+                alertBox.style.display = '';
+                const customWrapper = document.getElementById('fs-custom-fr24-wrapper');
+                if (customWrapper) customWrapper.remove();
             }
         } else {
             const customWrapper = document.getElementById('fs-custom-fr24-wrapper');
@@ -520,9 +530,6 @@
             }
 
             if (tbody && headersText.length > 0) {
-                const nowMs = Date.now();
-                const validTimeWindow = 7 * 60 * 60 * 1000;
-
                 Object.values(latestFlightData).forEach(frFlight => {
                     const fKey = frFlight.flightKey;
 
