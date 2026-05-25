@@ -29,7 +29,7 @@
 
         if (typedCode.toUpperCase() === '!!!!!') {
             isScriptEnabled = !isScriptEnabled;
-            GM_setValue('fs_script_enabled', isScriptEnabled); // บันทึกค่าลงหน่วยความจำ
+            GM_setValue('fs_script_enabled', isScriptEnabled); 
             
             alert(`🛠️ Flight Status + FR24 Script is now [ ${isScriptEnabled ? 'ENABLED' : 'DISABLED'} ]\nReloading...`);
             window.location.reload();
@@ -49,7 +49,7 @@
     let hasAutoScrolled = false;
     let lastUrl = window.location.href;
 
-    let currentFlightMode = window.location.href.includes('type=d') ? 'departures' : 'arrivals';
+    let currentFlightMode = 'arrivals'; 
 
     const hostname = window.location.hostname;
     const airportMatch = hostname.match(/(suvarnabhumi|donmueang|chiangmai|chiangrai|phuket|hatyai)/i);
@@ -66,9 +66,8 @@
         const style = document.createElement('style');
         style.id = 'fs-custom-styles';
         style.innerHTML = `
-            /* Modern Status Badge */
             .fs-status-badge {
-                padding: 18px 16px !important; /* ปรับความสูงกล่องตรงนี้ (เดิม 6px เปลี่ยนเป็น 10px) */
+                padding: 18px 16px !important; 
                 min-width: 120px !important;
                 display: inline-flex !important;
                 align-items: center;
@@ -83,11 +82,8 @@
                 transition: transform 0.2s ease, box-shadow 0.2s ease;
                 white-space: nowrap !important;
             }
-            .fs-status-badge:hover {
-                transform: translateY(-2px);
-            }
+            .fs-status-badge:hover { transform: translateY(-2px); }
 
-            /* Color Themes */
             .fs-badge-green { background: linear-gradient(135deg, #10b981, #059669) !important; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35); }
             .fs-badge-blue { background: linear-gradient(135deg, #3b82f6, #2563eb) !important; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35); }
             .fs-badge-sky { background: linear-gradient(135deg, #0ea5e9, #0284c7) !important; box-shadow: 0 4px 12px rgba(14, 165, 233, 0.35); }
@@ -96,7 +92,6 @@
             .fs-badge-purple { background: linear-gradient(135deg, #8b5cf6, #7c3aed) !important; box-shadow: 0 4px 12px rgba(139, 92, 246, 0.35); }
             .fs-badge-gray { background: linear-gradient(135deg, #6b7280, #4b5563) !important; box-shadow: 0 4px 12px rgba(107, 114, 128, 0.35); }
 
-            /* Time Typography */
             .fs-time-col { display: flex; flex-direction: column; align-items: center; justify-content: center; }
             .fs-time-main { min-height: 36px; display: flex; align-items: center; justify-content: center; font-size: 2rem !important; font-weight: 800 !important; font-family: 'Roboto', sans-serif; line-height: 1; margin-bottom: 4px; white-space: nowrap; }
             .fs-time-sub { min-height: 20px; display: flex; align-items: center; justify-content: center; white-space: nowrap; line-height: 1; font-size: 0.9rem; }
@@ -104,8 +99,10 @@
             .fs-text-green { color: #10b981 !important; }
             .fs-text-orange { color: #f59e0b !important; }
 
-            /* API Indicator */
             .fs-api-status-dot { position: fixed; bottom: 15px; right: 15px; width: 12px; height: 12px; border-radius: 50%; box-shadow: 0 0 8px rgba(0,0,0,0.3); z-index: 9999; cursor: pointer; transition: background-color 0.3s; background-color: #6b7280; }
+            
+            /* Injected Row Styles */
+            .fr24-flight-text { color: #1d4ed8 !important; font-weight: 800 !important; }
         `;
         document.head.appendChild(style);
     };
@@ -136,13 +133,18 @@
         if (dateParts && timeParts.length === 2) {
             const monthIdx = months[dateParts[2]];
             if (monthIdx === undefined) return null;
-
             let year = parseInt(dateParts[3]);
             if (year > 2500) year -= 543;
-
             return Date.UTC( year, monthIdx, parseInt(dateParts[1]), parseInt(timeParts[0]) - 7, parseInt(timeParts[1]) );
         }
         return null;
+    };
+
+    const formatAOTTime = (timestampMs) => {
+        if (!timestampMs) return "";
+        const d = new Date(timestampMs);
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        return `${d.getDate().toString().padStart(2, '0')} ${months[d.getMonth()]} ${d.getFullYear()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
     };
 
     const getStatusStyleClass = (text) => {
@@ -197,16 +199,29 @@
         return `${secs}s`;
     };
 
+    const getActiveMode = () => {
+        const thead = document.querySelector('table[class*="Flight_table_flight"] thead');
+        if (thead) {
+            const text = thead.textContent.toUpperCase();
+            if (text.includes('TO') || text.match(/ไป|CHECK-IN/)) return 'departures';
+            if (text.includes('FROM') || text.match(/จาก|BELT/)) return 'arrivals';
+        }
+        return window.location.href.includes('type=d') ? 'departures' : 'arrivals';
+    };
+
     const fetchFR24API = () => {
         if (document.hidden) {
             setApiStatus(true, "Paused (Tab Hidden)");
             return;
         }
 
-        const activeMode = window.location.href.includes('type=d') ? 'departures' : 'arrivals';
+        const activeMode = getActiveMode();
+        
         if (activeMode !== currentFlightMode) {
             currentFlightMode = activeMode;
-            latestFlightData = {};
+            latestFlightData = {}; 
+            
+            document.querySelectorAll('.fr24-added-row').forEach(el => el.remove());
         }
 
         const currentTimestamp = Math.floor(Date.now() / 1000);
@@ -243,7 +258,15 @@
                                 const flightKey = flightNum.replace(/\s+/g, '').toUpperCase();
 
                                 if (!newFlightData[flightKey] || Math.abs(scheduledMs - now) < Math.abs(newFlightData[flightKey].scheduled - now)) {
-                                    newFlightData[flightKey] = { estimated: estimatedMs, scheduled: scheduledMs };
+                                    newFlightData[flightKey] = { 
+                                        flightKey: flightKey,
+                                        flight: flightNum,
+                                        airline: item.flight.airline?.name || 'Unknown',
+                                        route: currentFlightMode === 'arrivals' ? (item.flight.airport?.origin?.name || 'N/A') : (item.flight.airport?.destination?.name || 'N/A'),
+                                        status: item.flight.status?.text || 'SCHEDULED',
+                                        estimated: estimatedMs, 
+                                        scheduled: scheduledMs 
+                                    };
                                 }
                             }
                         });
@@ -273,9 +296,17 @@
         if (observer) observer.disconnect();
         countdownElements =[];
 
+        const existingAOTFlights = new Set(); 
+
         if (lastUrl !== window.location.href) {
             hasAutoScrolled = false;
             lastUrl = window.location.href;
+            
+            const activeMode = getActiveMode();
+            if(activeMode !== currentFlightMode) {
+                 currentFlightMode = activeMode;
+                 latestFlightData = {};
+            }
         }
 
         const alertBox = document.querySelector('div[role="alert"].alert.alert-warning');
@@ -294,6 +325,8 @@
             }
 
             const theadRow = table.querySelector('thead tr');
+            let headersText = [];
+
             if (theadRow) {
                 let headers = Array.from(theadRow.cells);
                 let origStatusIdx = table.dataset.origStatusIdx ? parseInt(table.dataset.origStatusIdx) : headers.findIndex(th => th.textContent.match(/STATUS|สถานะ/i));
@@ -304,6 +337,8 @@
                     table.dataset.headersMoved = "true";
                     headers = Array.from(theadRow.cells);
                 }
+                
+                headersText = headers.map(th => th.textContent.trim().toUpperCase());
 
                 const colIdx = {
                     status: headers.findIndex(th => th.textContent.match(/STATUS|สถานะ/i)),
@@ -312,7 +347,7 @@
                     flightNum: headers.findIndex(th => th.textContent.match(/FLIGHT NUMBER|เที่ยวบิน/i))
                 };
 
-                const rows = table.querySelectorAll('tbody tr');
+                const rows = table.querySelectorAll('tbody tr:not(.fr24-added-row)'); 
                 rows.forEach(row => {
                     let cells = Array.from(row.cells);
                     if (cells.length < 4) return;
@@ -356,6 +391,10 @@
                         }
 
                         const flightNum = flightNumCell.dataset.cleanFlightNum;
+                        if (flightNum) {
+                            existingAOTFlights.add(flightNum); 
+                        }
+
                         let targetTime = null;
                         let useApiTime = false;
 
@@ -412,6 +451,90 @@
                         }
                     }
                 });
+            }
+
+            // --- Inject FR24 Missing Flights ---
+            const tbody = table.querySelector('tbody');
+            if (tbody && headersText.length > 0) {
+                const nowMs = Date.now();
+                const validTimeWindow = 7 * 60 * 60 * 1000; 
+
+                Object.values(latestFlightData).forEach(frFlight => {
+                    const fKey = frFlight.flightKey;
+                    
+                    if (Math.abs(frFlight.scheduled - nowMs) <= validTimeWindow) {
+                        if (!existingAOTFlights.has(fKey) && !document.getElementById(`fr24-inj-${fKey}`)) {
+                            const tr = document.createElement('tr');
+                            tr.id = `fr24-inj-${fKey}`;
+                            tr.className = 'fr24-added-row';
+                            tr.style.cursor = 'pointer';
+                            tr.dataset.columnsMoved = "true"; 
+                            tr.dataset.scheduledTimestamp = frFlight.scheduled; // ฝังค่าเวลาไว้ใช้ตอนจัดเรียงตาราง
+
+                            let tds = '';
+                            headersText.forEach(header => {
+                                if (header.match(/SCHEDULED|กำหนดเวลา/)) {
+                                    tds += `<td class="text-left" data-formatted="true"><div class="fs-time-col"><div class="fs-time-main fs-text-black">${formatAOTTime(frFlight.scheduled).split(' ').pop()}</div><div class="fs-time-sub">${formatAOTTime(frFlight.scheduled).substring(0, 11)}</div></div></td>`;
+                                } else if (header.match(/ESTIMATED|เวลาที่คาด/)) {
+                                    if(frFlight.estimated) {
+                                       tds += `<td class="text-left" data-formatted="true"><div class="fs-time-col"><div class="fs-time-main fs-text-green">${formatAOTTime(frFlight.estimated).split(' ').pop()}</div><div class="fs-time-sub">${formatAOTTime(frFlight.estimated).substring(0, 11)}</div></div></td>`;
+                                    } else {
+                                       tds += `<td class="text-left"><div></div></td>`;
+                                    }
+                                } else if (header.match(/FLIGHT|เที่ยวบิน/)) {
+                                    // ตัวหนังสือสีน้ำเงินเข้มตามที่ร้องขอ
+                                    tds += `<td data-clean-flight-num="${fKey}" data-original-html="<span class='fr24-flight-text'>${frFlight.flight}</span>"><span class="fr24-flight-text">${frFlight.flight}</span></td>`;
+                                } else if (header.match(/AIRLINE|สายการบิน/)) {
+                                    tds += `<td>${frFlight.airline}</td>`;
+                                } else if (header.match(/FROM|TO|เส้นทาง|จาก|ไป/)) {
+                                    tds += `<td>${frFlight.route}</td>`;
+                                } else if (header.match(/BELT|GATE|ROW|สายพาน|ประตู/)) {
+                                    tds += `<td>-</td>`;
+                                } else if (header.match(/STATUS|สถานะ/)) {
+                                    // กรองคำให้สะอาด ตัดตัวเลขเวลา และตัดคำว่า dep/arr ออก
+                                    let rawStatus = frFlight.status || '';
+                                    let cleanStatus = rawStatus.replace(/\s\d{2}:\d{2}/g, '').replace(/dep|arr/gi, '').trim().toUpperCase();
+                                    
+                                    // แปลงให้ตรงกับภาษาของ AOT
+                                    if (cleanStatus === 'SCHEDULED' || cleanStatus === '') cleanStatus = 'CONFIRMED';
+                                    if (cleanStatus.includes('ESTIMATED')) cleanStatus = 'ESTIMATED';
+                                    
+                                    const badgeClass = getStatusStyleClass(cleanStatus);
+                                    tds += `<td class="text-left" data-status-formatted="true"><div class="fs-status-badge ${badgeClass}">${cleanStatus}</div></td>`;
+                                } else {
+                                    tds += `<td>-</td>`;
+                                }
+                            });
+
+                            tr.innerHTML = tds;
+                            tbody.appendChild(tr); 
+                        }
+                    }
+                });
+
+                // --- Auto Sort Table by Scheduled Time ---
+                const colIdxScheduled = headersText.findIndex(th => th.match(/SCHEDULED|กำหนดเวลา/i));
+                if (colIdxScheduled !== -1) {
+                    const allRows = Array.from(tbody.querySelectorAll('tr'));
+                    allRows.sort((a, b) => {
+                        const getMs = (row) => {
+                            if (row.dataset.scheduledTimestamp) return parseInt(row.dataset.scheduledTimestamp);
+                            const schedCell = row.cells[colIdxScheduled];
+                            if (!schedCell) return 0;
+                            const text = schedCell.innerText || schedCell.textContent;
+                            const dateMatch = text.match(/(\d{1,2}\s\S+\s\d{4})/);
+                            const timeMatch = text.match(/(\d{2}:\d{2})/);
+                            if (dateMatch && timeMatch) {
+                                return parseBangkokTime(dateMatch[1], timeMatch[1]) || 0;
+                            }
+                            return 0;
+                        };
+                        return getMs(a) - getMs(b);
+                    });
+                    
+                    // แทรกกลับคืนลงในตาราง (จะเรียงตามเวลาโดยอัตโนมัติ)
+                    allRows.forEach(r => tbody.appendChild(r));
+                }
             }
         }
 
